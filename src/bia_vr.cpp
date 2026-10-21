@@ -70,6 +70,10 @@ struct Config {
     int   gunTraceFire;     // bullets travel along the gun sight line (the laser)
     float leftHandRoll;     // degrees added to the left hand bone roll
     int   zoomedFire;       // while firing, the game logic sees the weapon as zoomed (R1 accuracy, no R1 pose)
+    int   aimDownSights;    // R1 (away from the holsters) uses the game's zoom mode
+    int   showHints;        // first-chapter tip about R1 / F6 when shooting from the hip
+    int   cutsceneScreen;   // cutscenes play on the floating screen instead of around you
+    int   movieOverLevel;   // experimental: prefer the movie when it plays over the level
     float twoHandSmoothing; // 0 = none, 0.9 = very smooth (two-handed only)
 } g_cfg;
 static bool g_autoScale;
@@ -88,8 +92,8 @@ static const char* kDefaultIni =
 "ControllerAim=1\r\n"
 "; Right-stick snap turn step in degrees\r\n"
 "SnapTurnDegrees=30\r\n"
-"; Red laser from the gun (F6 toggles)\r\n"
-"GunLaser=1\r\n"
+"; Red laser from the gun (F6 toggles in game)\r\n"
+"GunLaser=0\r\n"
 "; Put your left hand on the rifle's front to aim with both hands\r\n"
 "TwoHandedAim=1\r\n"
 "TwoHandSmoothing=0.5\r\n"
@@ -99,10 +103,16 @@ static const char* kDefaultIni =
 "LeftHandRollDegrees=180\r\n"
 "; 3 = no bullet spread (your hand aims), 2 = aim-down-sights accuracy always, 0 = game default\r\n"
 "RaiseToAimAccuracy=3\r\n"
-"; R1 accuracy while you shoot, without the R1 slowdown (experimental)\r\n"
-"ZoomedAccuracyWhenFiring=1\r\n"
+"; Experimental: zoomed accuracy while firing (makes shots follow your view - leave 0)\r\n"
+"ZoomedAccuracyWhenFiring=0\r\n"
+"; 1 = R1 aims down sights (most accurate; slower movement). Holster switching works either way\r\n"
+"AimDownSights=1\r\n"
+"; Show a tip about R1 and F6 when shooting from the hip in the first chapter\r\n"
+"ShowHints=1\r\n"
+"; Cutscenes play on the floating screen (prevents motion sickness)\r\n"
+"CutscenesOnScreen=0\r\n"
 "; HUD size toward the centre of view (1 = full size)\r\n"
-"HudScale=0.55\r\n"
+"HudScale=1\r\n"
 "; Floating menu screen: distance and width in metres\r\n"
 "MenuDistance=2.2\r\n"
 "MenuWidth=1.8\r\n"
@@ -127,7 +137,7 @@ static void LoadConfig() {
     g_cfg.useSharedHandle = CfgI("SubmitSharedHandle", 0);
     g_cfg.menuDistance    = CfgF("MenuDistance", 2.2f);
     g_cfg.menuWidth       = CfgF("MenuWidth", 1.8f);
-    g_cfg.hudScale        = CfgF("HudScale", 0.55f);
+    g_cfg.hudScale        = CfgF("HudScale", 1.0f);
     g_cfg.exactProjection = CfgI("ExactProjection", 1);
     g_cfg.controllerAim   = CfgI("ControllerAim", 1);
     g_cfg.aimPitchOffset  = CfgF("AimPitchOffset", 0.f);
@@ -139,7 +149,7 @@ static void LoadConfig() {
     g_cfg.gunFwd          = CfgF("GunOffsetForward", -55.f);
     g_cfg.gunRight        = CfgF("GunOffsetRight", -11.f);
     g_cfg.gunUp           = CfgF("GunOffsetUp", 14.f);
-    g_cfg.gunLaser        = CfgI("GunLaser", 1);
+    g_cfg.gunLaser        = CfgI("GunLaser", 0);
     g_cfg.laserKey        = CfgI("LaserKey", VK_F6);
     g_cfg.raiseAccuracy   = CfgI("RaiseToAimAccuracy", 3);
     g_cfg.raiseDistance   = CfgF("RaiseDistance", 0.25f);
@@ -147,7 +157,11 @@ static void LoadConfig() {
     g_cfg.leftArmIK       = CfgI("LeftArmIK", 1);
     g_cfg.gunTraceFire    = CfgI("BulletsFollowGun", 0);
     g_cfg.leftHandRoll    = CfgF("LeftHandRollDegrees", 180.f);
-    g_cfg.zoomedFire      = CfgI("ZoomedAccuracyWhenFiring", 1);
+    g_cfg.zoomedFire      = CfgI("ZoomedAccuracyWhenFiring", 0);
+    g_cfg.aimDownSights   = CfgI("AimDownSights", 1);
+    g_cfg.showHints       = CfgI("ShowHints", 1);
+    g_cfg.cutsceneScreen  = CfgI("CutscenesOnScreen", 0);
+    g_cfg.movieOverLevel  = CfgI("MovieOverLevel", 0);
     g_cfg.twoHandSmoothing = CfgF("TwoHandSmoothing", 0.5f);
 }
 
@@ -183,15 +197,25 @@ static bool  g_exactUsed[2];                    // this eye was rendered with th
 struct FrameStats { int persp, ortho, rhwDraws, shaderDraws, draws; float gameA, gameB; } g_stats;
 static DWORD g_fvf; static void* g_vs;
 static int   g_statFrames;
+struct HudDiag { int orthoBB, orthoOther, perspBB, perspOther, orthoBeforeScene, otherRegs; } g_hud;
 static float g_leftPos[3]; static float g_leftAxes[3][3]; static bool g_leftValid;   // Unreal-local (body) frame, metres / axes
 static int   g_pawnOff = -1;
 static int   g_rotOffset = -1, g_locOffset = -1;
 static void* g_bbPtr;               // current backbuffer surface (identity only, not referenced)
 static bool  g_rtIsBB = true;
+static bool  g_seenPersp;                       // a perspective (3D) matrix was used in this eye
+static float g_c8[16];                          // last uploaded c8..c11
+static void* g_tex0;                            // texture bound to stage 0
+static void* g_sceneTex;                        // off-screen texture the 3D world is drawn into
+static void* g_rtTex[16]; static int g_numRtTex;   // every texture the game renders into (world / effects)
 static bool  g_aimActive;                       // controller aiming drives the player this frame
 static int   g_bodyYaw;                         // Unreal yaw of the player's body (snap turn)
 static FRotator g_lastGameRot;                  // camera rotation the game asked for (before VR)
 static FVector g_lastGameLoc;                   // camera location the game asked for (= where bullets start)
+static void* g_viewActor;                       // actor the game camera views from this frame
+static bool  g_cutscene;                        // camera belongs to something other than the player (cutscene)
+static bool  g_cutsceneRot;                     // camera has stopped following our aim (scripted camera)
+static DWORD g_lastMoviePresent;                // last frame presented outside the engine Draw (movie)
 static float g_laserLen = 12.f;                 // metres, shortened to the traced hit point
 static FVector g_gunStart, g_gunDir; static bool g_gunRayValid;   // world-space sight line of the gun
 static FRotator g_bulletRot; static float g_bulletDir[3]; static bool g_bulletValid;   // eye -> laser target
@@ -203,6 +227,7 @@ static vr::HmdMatrix34_t g_handPose;            // raw right controller pose (fo
 static float g_aimVR[3][3];                     // final aim axes in OpenVR space: fwd, up, right
 static bool  g_twoHand;                         // left hand is steering the gun
 static bool  g_leftGrabbing;                    // L1 is holding the gun (not adjusting it)
+extern wchar_t g_gunClass[64];
 static FRotator g_drawActorSavedRot;
 static void* g_drawActor;                       // actor being drawn by UCanvas::DrawActor (first-person gun)
 static FVector g_drawActorSavedLoc; static bool g_drawActorMoved;
@@ -347,9 +372,8 @@ static void ApplyVRCamera(FVector& loc, FRotator& rot, float& fov, FVector* hand
 
 static void* __fastcall hkPlayerSceneNode(void* self, void* edx, void* viewport, void* target, void* viewActor,
                                           FVector loc, FRotator rot, float fov) {
-    if (g_inDraw) g_sceneSeen = true;
+    if (g_inDraw) { g_sceneSeen = true; g_viewActor = viewActor; g_lastGameRot = rot; g_lastGameLoc = loc; }
     if ((g_eye == 0 || g_eye == 1) && g_hmdValid) {
-        g_lastGameRot = rot; g_lastGameLoc = loc;
         ApplyVRCamera(loc, rot, fov, nullptr);
     }
     return oPlayerSceneNode(self, edx, viewport, target, viewActor, loc, rot, fov);
@@ -362,9 +386,12 @@ static SightCal* FindSight(const wchar_t* cls, bool create);
 static void SaveSight(const SightCal* sc);
 static void ProbeBones(void* actor);
 static bool ZoomHeld();
+struct ZoomFlag;
+static bool g_gameZoomed;                       // weapon really is in R1 zoom (m_fZoomed)
+static void UpdateHint();
 static void SolveLeftArm(void* actor, const FVector& gameLoc);
 static int g_zoomFrames;
-static wchar_t g_gunClass[64];                  // class of the first-person weapon last drawn
+wchar_t g_gunClass[64];                         // class of the first-person weapon last drawn
 static float g_gunFwdCur; static bool g_gunFwdLoaded;
 typedef void* (__fastcall* CameraSceneNode_t)(void* self, void* edx, void* viewport, void* target, void* viewActor,
                                               FVector loc, FRotator rot, float fov, float a, float b);
@@ -670,14 +697,15 @@ static void SendMouseButton(bool left, bool down) {
     SendInput(1, &in, sizeof in);
 }
 
-enum Action { A_HOLSTER, A_FIRE, A_ZOOM, A_FWD, A_BACK, A_LEFT, A_RIGHT, A_USE, A_DUCK, A_JUMP, A_WEAPON, A_SQUAD, A_MELEE, A_MENU, A_COUNT };
+enum Action { A_V, A_HOLSTER, A_FIRE, A_ZOOM, A_FWD, A_BACK, A_LEFT, A_RIGHT, A_USE, A_DUCK, A_JUMP, A_WEAPON, A_SQUAD, A_MELEE, A_MENU, A_COUNT };
 static bool g_actState[A_COUNT];
 static void SetAction(int a, bool on) {
     if (g_actState[a] == on) return;
     g_actState[a] = on;
-    static int logs; static const char* names[] = { "holster", "fire", "zoom", "fwd", "back", "left", "right", "use", "duck", "jump", "weapon", "squad", "melee", "menu" };
+    static int logs; static const char* names[] = { "V", "holster", "fire", "zoom", "fwd", "back", "left", "right", "use", "duck", "jump", "weapon", "squad", "melee", "menu" };
     if (logs++ < 300) Log("input %s %s", names[a], on ? "down" : "up");
     switch (a) {
+    case A_V:      SendKey('V', on); break;
     case A_HOLSTER: SendKey(VK_TAB, on); break;
     case A_FIRE:   SendMouseButton(true, on); break;
     case A_ZOOM:   SendMouseButton(false, on); break;
@@ -789,13 +817,21 @@ static bool UpdateControllers(FRotator& aimOut) {
         lastZone = zone;
         bool r1 = Pressed(rs, vr::k_EButton_Grip);
         SetAction(A_HOLSTER, zone != 0 && r1);
-        SetAction(A_ZOOM, zone == 0 && r1 && !g_actState[A_HOLSTER]);
+        SetAction(A_ZOOM, g_cfg.aimDownSights && zone == 0 && r1 && !g_actState[A_HOLSTER]);
         SetAction(A_USE,  Pressed(rs, vr::k_EButton_A));
         SetAction(A_DUCK, Pressed(rs, vr::k_EButton_ApplicationMenu));
         SetAction(A_MELEE, Pressed(rs, vr::k_EButton_SteamVR_Touchpad));
         static bool turned, adjusting;
         float x = rs.rAxis[0].x;
-        bool adjust = lOk && Pressed(ls, vr::k_EButton_Grip) && !g_leftGrabbing && !g_twoHand;
+        bool l1Down = lOk && Pressed(ls, vr::k_EButton_Grip);
+        static DWORD l1Since; static bool l1Was2, l1Moved;
+        if (l1Down && !l1Was2) { l1Since = GetTickCount(); l1Moved = false; }
+        if (l1Down && (fabsf(rs.rAxis[0].x) > 0.2f || fabsf(rs.rAxis[0].y) > 0.2f)) l1Moved = true;
+        static DWORD vUntil;
+        if (!l1Down && l1Was2 && !l1Moved && GetTickCount() - l1Since < 350) { SetAction(A_V, true); vUntil = GetTickCount() + 80; }
+        if (vUntil && GetTickCount() > vUntil) { SetAction(A_V, false); vUntil = 0; }
+        l1Was2 = l1Down;
+        bool adjust = l1Down && !g_leftGrabbing && !g_twoHand && GetTickCount() - l1Since >= 350;
         if (adjust) {
             float dt = 1.f / 90.f, rate = 25.f;
             if (fabsf(rs.rAxis[0].y) > 0.2f) g_gunFwdCur += rs.rAxis[0].y * rate * dt;
@@ -850,30 +886,42 @@ static bool UpdateControllers(FRotator& aimOut) {
         along = d[0] * af[0] + d[1] * af[1] + d[2] * af[2];
         lateral = sqrtf(max(len * len - along * along, 0.f));
     }
-    // Auto-attach (Titanfall style): on when the left hand reaches the fore-end zone,
-    // off when it clearly leaves it. The release zone is wider so it doesn't flicker.
-    bool onWeapon = leftPose && along >= 0.05f && along <= 0.60f && lateral <= 0.22f;
-    bool nearWeapon = leftPose && along >= 0.0f && along <= 0.75f && lateral <= 0.32f;
+    // Titanfall-style auto grip: the left hand grabs when it comes near the right hand (not behind
+    // it). At that moment the hand line and the gun direction are remembered; from then on the gun
+    // turns by however much the hand line turns, so any comfortable grip works without a yank.
+    // Released when the left hand moves well away.
+    static float line0[3], fwd0[3], up0[3];
+    bool pistol = wcsstr(g_gunClass, L"1911") || wcsstr(g_gunClass, L"Pistol") || wcsstr(g_gunClass, L"Luger") || wcsstr(g_gunClass, L"P38");
+    bool nearGrab = leftPose && !pistol && len < 0.38f && len > 0.10f && along > 0.02f;
+    bool farAway  = !leftPose || pistol || len > 0.50f || along < -0.10f;
     (void)l1;
-    if (!twoHand && onWeapon) twoHand = true;
-    if (twoHand && !nearWeapon) twoHand = false;
+    if (!twoHand && nearGrab) {
+        twoHand = true;
+        for (int i = 0; i < 3; ++i) { line0[i] = d[i] / len; fwd0[i] = af[i]; up0[i] = au[i]; }
+    } else if (twoHand && farAway) twoHand = false;
     g_leftGrabbing = twoHand;
-    static int dbg; if (leftPose && dbg < 30 && g_framesRendered % 90 == 0) { ++dbg; Log("left hand vs gun: ahead %.2f m, off-axis %.2f m, attached %d", along, lateral, twoHand); }
+    static int dbg; if (leftPose && dbg < 30 && g_framesRendered % 90 == 0) { ++dbg; Log("left hand vs gun: %.2f m apart, ahead %.2f m, attached %d", len, along, twoHand); }
 
-    if (twoHand && len > 0.12f) {
-        float dh[3] = { d[0] / len, d[1] / len, d[2] / len };
-        float c = min(max(dh[0] * af[0] + dh[1] * af[1] + dh[2] * af[2], -1.f), 1.f);
-        float ang = acosf(c);
-        const float soft = 0.96f, maxA = 1.57f;
-        float lim = ang <= soft ? ang : soft + (maxA - soft) * (1.f - expf(-(ang - soft) / (maxA - soft)));
-        float perp[3] = { dh[0] - af[0] * c, dh[1] - af[1] * c, dh[2] - af[2] * c };
-        float pl = sqrtf(perp[0] * perp[0] + perp[1] * perp[1] + perp[2] * perp[2]);
-        float nf[3];
-        if (pl > 1e-5f) for (int i = 0; i < 3; ++i) nf[i] = af[i] * cosf(lim) + perp[i] / pl * sinf(lim);
-        else for (int i = 0; i < 3; ++i) nf[i] = af[i];
-        // Keep the right hand's roll: up = right controller up made perpendicular to the barrel.
-        float k = au[0] * nf[0] + au[1] * nf[1] + au[2] * nf[2];
-        float nu[3] = { au[0] - k * nf[0], au[1] - k * nf[1], au[2] - k * nf[2] };
+    if (twoHand && len > 0.05f) {
+        // Shortest rotation taking line0 to the current hand line, applied to the remembered gun axes.
+        float ln[3] = { d[0] / len, d[1] / len, d[2] / len };
+        float ax[3] = { line0[1] * ln[2] - line0[2] * ln[1], line0[2] * ln[0] - line0[0] * ln[2], line0[0] * ln[1] - line0[1] * ln[0] };
+        float sn = sqrtf(ax[0] * ax[0] + ax[1] * ax[1] + ax[2] * ax[2]);
+        float cs = line0[0] * ln[0] + line0[1] * ln[1] + line0[2] * ln[2];
+        auto rot = [&](const float v[3], float o[3]) {
+            if (sn < 1e-6f) { o[0] = v[0]; o[1] = v[1]; o[2] = v[2]; return; }
+            float k[3] = { ax[0] / sn, ax[1] / sn, ax[2] / sn };
+            float kv = k[0] * v[0] + k[1] * v[1] + k[2] * v[2];
+            float kx[3] = { k[1] * v[2] - k[2] * v[1], k[2] * v[0] - k[0] * v[2], k[0] * v[1] - k[1] * v[0] };
+            for (int i = 0; i < 3; ++i) o[i] = v[i] * cs + kx[i] * sn + k[i] * kv * (1.f - cs);   // Rodrigues
+        };
+        float nf[3], nu[3];
+        rot(fwd0, nf); rot(up0, nu);
+        // Re-orthonormalise and keep the right hand on the same side.
+        float fl = sqrtf(nf[0] * nf[0] + nf[1] * nf[1] + nf[2] * nf[2]);
+        for (int i = 0; i < 3; ++i) nf[i] /= fl;
+        float k = nu[0] * nf[0] + nu[1] * nf[1] + nu[2] * nf[2];
+        for (int i = 0; i < 3; ++i) nu[i] -= k * nf[i];
         float ul = sqrtf(nu[0] * nu[0] + nu[1] * nu[1] + nu[2] * nu[2]);
         if (ul > 1e-3f) {
             for (int i = 0; i < 3; ++i) nu[i] /= ul;
@@ -1200,7 +1248,20 @@ static void UpdateAim() {
 
     bool wasActive = g_aimActive;
     g_aimActive = false;
-    if (g_menuMode) { ReleaseAllActions(); AccRestore(); return; }
+    if (g_menuMode && !(g_cutscene || g_cutsceneRot)) {
+        // Prompts like "press Space to continue" are menu pages: keep Space and Esc on the controllers.
+        vr::TrackedDeviceIndex_t ri = g_vr->GetTrackedDeviceIndexForControllerRole(vr::TrackedControllerRole_RightHand);
+        vr::TrackedDeviceIndex_t li = g_vr->GetTrackedDeviceIndexForControllerRole(vr::TrackedControllerRole_LeftHand);
+        vr::VRControllerState_t rs = {}, ls = {};
+        bool rOk = ri != vr::k_unTrackedDeviceIndexInvalid && g_vr->GetControllerState(ri, &rs, sizeof rs);
+        bool lOk = li != vr::k_unTrackedDeviceIndexInvalid && g_vr->GetControllerState(li, &ls, sizeof ls);
+        for (int a = 0; a < A_COUNT; ++a) if (a != A_JUMP && a != A_MENU && a != A_V) SetAction(a, false);
+        SetAction(A_V, lOk && Pressed(ls, vr::k_EButton_Grip));
+        SetAction(A_JUMP, (lOk && Pressed(ls, vr::k_EButton_A)) || (rOk && Pressed(rs, vr::k_EButton_A)));
+        SetAction(A_MENU, lOk && Pressed(ls, vr::k_EButton_SteamVR_Touchpad));
+        AccRestore();
+        return;
+    }
     InitReflection();
     FRotator* pcRot = g_cfg.controllerAim ? PlayerRotation() : nullptr;
     if (pcRot && !wasActive) {
@@ -1208,15 +1269,22 @@ static void UpdateAim() {
         g_bodyYaw = (pcRot->Yaw - (g_hmdValid ? HeadYawU() : 0)) & 0xFFFF;
         Log("controller aim active, body yaw %d", g_bodyYaw);
     }
-    // If the camera never follows what we write, we're steering the wrong (old) PlayerController.
-    static int lastWrittenYaw = -1, mismatch;
+    // If the camera stops following the aim we write, either we hold an old PlayerController (after a
+    // menu/level change: rescan once) or a cutscene is driving the camera (show it on the screen).
+    static int lastWrittenYaw = -1, mismatch, match; static bool rescanned;
     if (pcRot && lastWrittenYaw >= 0) {
-        if (YawDiff(g_lastGameRot.Yaw, lastWrittenYaw) > 1500) ++mismatch; else mismatch = 0;
-        if (mismatch > 20) {
+        bool off = YawDiff(g_lastGameRot.Yaw, lastWrittenYaw) > 1500;
+        if (off) { ++mismatch; match = 0; } else { mismatch = 0; ++match; }
+        if (mismatch > 20 && !rescanned) {
             Log("PlayerController %p is not driving the camera (camera yaw %d, written %d); rescanning", g_pc, g_lastGameRot.Yaw, lastWrittenYaw);
-            g_pc = nullptr; g_pcIndex = -1; g_forceScan = true; mismatch = 0; lastWrittenYaw = -1;
+            void* old = g_pc;
+            g_pc = nullptr; g_pcIndex = -1; g_forceScan = true; lastWrittenYaw = -1;
             pcRot = PlayerRotation();
+            rescanned = true;
+            if (g_pc != old) mismatch = 0;
         }
+        if (mismatch > 30 && !g_cutsceneRot && g_cfg.cutsceneScreen) { g_cutsceneRot = true; Log("cutscene detected (camera ignores the aim)"); }
+        if (match > 10) { if (g_cutsceneRot) Log("cutscene over"); g_cutsceneRot = false; rescanned = false; }
     }
     FRotator aim;
     bool aimOk = UpdateControllers(aim);
@@ -1242,6 +1310,7 @@ static void UpdateAim() {
     else if (!g_menuMode) HideLaser();
     g_aimActive = pcRot != nullptr;
     if (g_aimActive) UpdateRaiseAccuracy(); else AccRestore();
+    UpdateHint();
 }
 
 static void InitGuiReflection() {
@@ -1486,6 +1555,83 @@ static void SolveLeftArm(void* actor, const FVector& gameLoc) {
 }
 
 
+// ---------------------------------------------------------------------------
+// First-chapter tip: shooting from the hip shows "hold R1 / F6 laser" for a few seconds.
+
+static vr::VROverlayHandle_t g_hint = vr::k_ulOverlayHandleInvalid;
+static DWORD g_hintUntil;
+
+static bool CreateHintOverlay() {
+    if (g_hint != vr::k_ulOverlayHandleInvalid) return true;
+    if (vr::VROverlay()->CreateOverlay("bia.vr.hint", "BiA-VR tip", &g_hint) != vr::VROverlayError_None) { g_hint = vr::k_ulOverlayHandleInvalid; return false; }
+    const int W = 1024, H = 128;
+    BITMAPINFO bi = {}; bi.bmiHeader.biSize = sizeof bi.bmiHeader; bi.bmiHeader.biWidth = W; bi.bmiHeader.biHeight = -H;
+    bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32; bi.bmiHeader.biCompression = BI_RGB;
+    void* bits = nullptr;
+    HDC dc = CreateCompatibleDC(nullptr);
+    HBITMAP bmp = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    HGDIOBJ oldBmp = SelectObject(dc, bmp);
+    RECT rc = { 0, 0, W, H };
+    HBRUSH bg = CreateSolidBrush(RGB(18, 18, 18)); FillRect(dc, &rc, bg); DeleteObject(bg);
+    HFONT font = CreateFontA(40, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, ANTIALIASED_QUALITY, 0, "Segoe UI");
+    HGDIOBJ oldFont = SelectObject(dc, font);
+    SetBkMode(dc, TRANSPARENT); SetTextColor(dc, RGB(255, 255, 255));
+    RECT r1 = { 0, 14, W, 64 }, r2 = { 0, 66, W, 118 };
+    DrawTextA(dc, "Tip: hold R1 to aim down sights for accurate shots", -1, &r1, DT_CENTER | DT_SINGLELINE);
+    SetTextColor(dc, RGB(255, 200, 120));
+    DrawTextA(dc, "F6 on the keyboard turns the aiming laser on / off", -1, &r2, DT_CENTER | DT_SINGLELINE);
+    GdiFlush();
+    // BGRA (GDI) -> RGBA, panel slightly see-through, text solid.
+    static uint8_t rgba[1024 * 128 * 4];
+    const uint8_t* src = (const uint8_t*)bits;
+    for (int i = 0; i < W * H; ++i) {
+        uint8_t b = src[i * 4], g = src[i * 4 + 1], r = src[i * 4 + 2];
+        rgba[i * 4] = r; rgba[i * 4 + 1] = g; rgba[i * 4 + 2] = b;
+        rgba[i * 4 + 3] = (r > 60 || g > 60) ? 255 : 200;
+    }
+    SelectObject(dc, oldFont); DeleteObject(font); SelectObject(dc, oldBmp); DeleteObject(bmp); DeleteDC(dc);
+    vr::VROverlay()->SetOverlayRaw(g_hint, rgba, W, H, 4);
+    vr::VROverlay()->SetOverlayWidthInMeters(g_hint, 0.7f);
+    vr::VROverlay()->SetOverlaySortOrder(g_hint, 20);
+    vr::HmdMatrix34_t t = {{ { 1, 0, 0, 0 }, { 0, 1, 0, -0.28f }, { 0, 0, 1, -1.3f } }};   // 1.3 m ahead, a bit low
+    vr::VROverlay()->SetOverlayTransformTrackedDeviceRelative(g_hint, vr::k_unTrackedDeviceIndex_Hmd, &t);
+    return true;
+}
+
+// Name of the package (map) the PlayerController lives in.
+static const wchar_t* CurrentMapName() {
+    void* o = g_pc;
+    for (int i = 0; o && i < 8; ++i) { void* outer = *(void**)((BYTE*)o + 0x1c); if (!outer) break; o = outer; }
+    return (o && pGetName) ? pGetName(o, nullptr) : L"";
+}
+
+static void UpdateHint() {
+    if (g_hint != vr::k_ulOverlayHandleInvalid && g_hintUntil && GetTickCount() > g_hintUntil) {
+        vr::VROverlay()->HideOverlay(g_hint); g_hintUntil = 0;
+    }
+    if (!g_cfg.showHints || !g_aimActive || !g_pc || g_menuMode || g_cutscene || g_cutsceneRot) return;
+    static bool fireWas; bool fire = g_actState[A_FIRE];
+    bool pressed = fire && !fireWas; fireWas = fire;
+    if (!pressed) return;
+    // Only from the hip (game not zoomed), and only in the first chapter.
+    static wchar_t lastMap[64]; static bool firstChapter;
+    const wchar_t* map = CurrentMapName();
+    if (wcscmp(map, lastMap)) {
+        wcsncpy_s(lastMap, map, _TRUNCATE);
+        firstChapter = !_wcsicmp(map, L"0D7_1300_HILL30") || !_wcsicmp(map, L"D0_0130_EAGLES") || !_wcsicmp(map, L"D0_0200_SILENCE");
+        Log("map %ls (first chapter: %d)", map, firstChapter);
+    }
+    if (!firstChapter) return;
+    static int hipShots, shown; static DWORD lastShown;
+    ++hipShots;
+    static int logs; if (logs++ < 8) Log("hint: shot %d (shown %d of 3)", hipShots, shown);
+    if (hipShots < 3 || shown >= 3 || (lastShown && GetTickCount() - lastShown < 120000)) return;
+    if (!CreateHintOverlay()) { Log("hint overlay could not be created"); return; }
+    vr::VROverlay()->ShowOverlay(g_hint);
+    g_hintUntil = GetTickCount() + 7000; lastShown = GetTickCount(); hipShots = 0; ++shown;
+    Log("showed the R1 / F6 tip (%d of 3)", shown);
+}
+
 // Places the floating menu screen in front of where the head is facing (level, yaw only).
 static vr::HmdMatrix34_t g_menuXform;
 static void PlaceMenu() {
@@ -1613,11 +1759,66 @@ static void HideMenu() {
     if (g_menuVisible) { vr::VROverlay()->HideOverlay(g_menuOverlay); g_menuVisible = false; HideLaser(); Log("menu screen off"); }
 }
 
+// Cutscene flags on the player (found by name): matinee / scripted camera.
+struct CutFlag { const wchar_t* name; void* holder; int off; DWORD mask; };
+static CutFlag g_cut[] = { { L"bInterpolating" }, { L"bCinematicView" }, { L"bIsInScriptedMode" }, { L"bScriptedCamInHead" } };
+static bool CutsceneFlagOn() {
+    static bool init;
+    if (!init && g_offsetField >= 0) {
+        init = true;
+        HMODULE core = GetModuleHandleA("Core.dll");
+        auto propClassFn = (StaticClass_t)GetProcAddress(core, "?StaticClass@UProperty@@SAPAVUClass@@XZ");
+        for (CutFlag& f : g_cut) {
+            void* pr = pStaticFindObject(propClassFn(), (void*)-1, f.name, 0);
+            if (!pr) { Log("cutscene flag %ls: not found", f.name); continue; }
+            f.holder = PropOuter(pr); f.off = PropOffset(pr);
+            for (int k = g_offsetField + 4; k < g_offsetField + 0x30; k += 4) {
+                DWORD v = *(DWORD*)((BYTE*)pr + k);
+                if (v && !(v & (v - 1))) { f.mask = v; break; }
+            }
+            Log("cutscene flag %ls: in %ls @0x%x mask 0x%lx", f.name, pGetName ? pGetName(f.holder, nullptr) : L"?", f.off, f.mask);
+        }
+    }
+    if (!g_pc || g_pawnOff <= 0) return false;
+    void* pawn = *(void**)((BYTE*)g_pc + g_pawnOff);
+    void* objs[2] = { g_pc, pawn };
+    static DWORD lastBits = 0xFFFFFFFF;
+    DWORD bits = 0; int bi = 0;
+    for (CutFlag& f : g_cut) {
+        for (void* o : objs) {
+            if (f.holder && f.mask && o && pIsA(o, nullptr, f.holder) && (*(DWORD*)((BYTE*)o + f.off) & f.mask)) bits |= 1u << bi;
+            ++bi;
+        }
+    }
+    if (bits != lastBits) {
+        lastBits = bits;
+        Log("cutscene flags now: interp pc %d pawn %d | cinematic pc %d pawn %d | scripted pc %d pawn %d | camInHead pc %d pawn %d",
+            !!(bits & 1), !!(bits & 2), !!(bits & 4), !!(bits & 8), !!(bits & 16), !!(bits & 32), !!(bits & 64), !!(bits & 128));
+    }
+    return (bits & 0x3F) != 0;      // camInHead is logged only
+}
+
+static bool IsCutsceneView() {
+    if (g_cfg.cutsceneScreen && CutsceneFlagOn()) return true;
+    if (g_cfg.cutsceneScreen && g_cutsceneRot) return true;
+    if (!g_cfg.cutsceneScreen || !g_pc || g_pawnOff <= 0 || !g_viewActor) return false;
+    void* pawn = *(void**)((BYTE*)g_pc + g_pawnOff);
+    if (!pawn) return false;                      // dead / spectating: keep normal view
+    return g_viewActor != pawn && g_viewActor != g_pc;
+}
+
 static void __fastcall hkDraw(void* self, void* edx, void* viewport, int blit, BYTE* hitData, int* hitSize) {
     if (!g_vrOk || !g_dev || hitData) { oDraw(self, edx, viewport, blit, hitData, hitSize); return; }
 
     PumpVR();
     if (!g_vrOk) { HideMenu(); oDraw(self, edx, viewport, blit, hitData, hitSize); return; }
+    if (g_cfg.movieOverLevel && g_lastMoviePresent && GetTickCount() - g_lastMoviePresent < 300) {
+        static int logs; if (logs++ < 3) Log("movie playing over the level: level drawn flat, movie on the floating screen");
+        g_inDraw = true; g_eye = 3;                 // eye 3: no VR camera, Present passes straight through
+        oDraw(self, edx, viewport, blit, hitData, hitSize);
+        g_eye = -1; g_inDraw = false;
+        return;
+    }
     vr::VRCompositor()->WaitGetPoses(g_poses, vr::k_unMaxTrackedDeviceCount, nullptr, 0);
     g_hmdValid = g_poses[vr::k_unTrackedDeviceIndex_Hmd].bPoseIsValid;
     if (g_hmdValid) g_hmd = g_poses[vr::k_unTrackedDeviceIndex_Hmd].mDeviceToAbsoluteTracking;
@@ -1638,17 +1839,22 @@ static void __fastcall hkDraw(void* self, void* edx, void* viewport, int blit, B
         oDraw(self, edx, viewport, blit, nullptr, nullptr);
         if (!g_capturedThisEye) CaptureEye(0);
         g_eye = -1; g_inDraw = false;
-        if (g_sceneSeen && !g_guiSeen) { g_menuMode = false; Log("menu closed"); }   // gameplay is back; go stereo next frame
+        bool cut = g_sceneSeen && IsCutsceneView();
+        if (cut != g_cutscene) { g_cutscene = cut; Log("cutscene %s (view from %ls)", cut ? "started" : "ended", g_viewActor ? ObjClassName(g_viewActor) : L"-"); }
+        if (g_sceneSeen && !g_guiSeen && !cut) { g_menuMode = false; Log("menu closed"); }   // gameplay is back; go stereo next frame
         ShowMenuFrame();
         return;
     }
 
     memset(&g_stats, 0, sizeof g_stats);
+    memset(&g_hud, 0, sizeof g_hud);
     g_exactUsed[0] = g_exactUsed[1] = false;
-    g_eye = 0; g_capturedThisEye = false; g_afterScene = false; g_rtIsBB = true;
+    g_eye = 0; g_capturedThisEye = false; g_afterScene = false; g_rtIsBB = true; g_seenPersp = false;
     oDraw(self, edx, viewport, 0, nullptr, nullptr);
     CaptureEye(0);
-    if (!g_sceneSeen || g_guiSeen) {              // no 3D world, or a menu on top of it
+    bool cutNow = g_sceneSeen && IsCutsceneView();
+    if (cutNow && !g_cutscene) { g_cutscene = true; Log("cutscene started (view from %ls)", ObjClassName(g_viewActor)); }
+    if (!g_sceneSeen || g_guiSeen || cutNow) {    // no 3D world, a menu on top of it, or a cutscene camera
         g_eye = -1; g_inDraw = false; g_menuMode = true;
         Log("menu opened (world drawn=%d, gui=%d)", g_sceneSeen, g_guiSeen);
         ShowMenuFrame();
@@ -1656,13 +1862,16 @@ static void __fastcall hkDraw(void* self, void* edx, void* viewport, int blit, B
     }
     HideMenu();
 
-    g_eye = 1; g_capturedThisEye = false; g_afterScene = false; g_rtIsBB = true;
+    g_eye = 1; g_capturedThisEye = false; g_afterScene = false; g_rtIsBB = true; g_seenPersp = false;
     oDraw(self, edx, viewport, blit, nullptr, nullptr);   // may Present; hkPresent captures first
     if (!g_capturedThisEye) CaptureEye(1);
     g_eye = -1; g_inDraw = false;
 
     SubmitEyes();
     if (++g_framesRendered == 1) Log("first stereo frame submitted");
+    if (g_framesRendered % 600 == 0)
+        Log("hud diag (left eye, last frame): ortho after scene on backbuffer %d / other target %d, ortho before scene %d, perspective backbuffer %d / other %d, uploads without c8-c11 %d",
+            g_hud.orthoBB, g_hud.orthoOther, g_hud.orthoBeforeScene, g_hud.perspBB, g_hud.perspOther, g_hud.otherRegs);
     if (g_statFrames < 3 || g_framesRendered % 3000 == 0) {
         ++g_statFrames;
         Log("frame %d: lens replaced %d (game lens _11=%.3f _22=%.3f), hud matrices scaled %d, draws %d (screen-space %d, shader %d), exact L=%d R=%d",
@@ -1802,6 +2011,7 @@ static void __fastcall hkEngineTick(void* self, void* edx, float dt) {
     // Log the zoom state when R1 changes, so the real flag can be identified.
     static bool zoomWas; bool zoom = g_actState[A_ZOOM];
     if (g_zfReady && zoom != zoomWas) { LogZoomState(zoom ? "R1 pressed" : "R1 released"); zoomWas = zoom; }
+    if (g_zfReady) { void* zo = ZoomHolder(g_zf[1]); g_gameZoomed = zo && ReadZoom(g_zf[1], zo); }
 
     struct Saved { void* o; int off; DWORD v; } saved[kZf]; int ns = 0;
     if (g_zfReady && g_cfg.zoomedFire && g_actState[A_FIRE] && !zoom && g_aimActive) {
@@ -1896,15 +2106,58 @@ static HRESULT WINAPI hkSetTransform(IDirect3DDevice9* d, D3DTRANSFORMSTATETYPE 
 typedef HRESULT (WINAPI* SetVSConstF_t)(IDirect3DDevice9*, UINT, const float*, UINT);
 static SetVSConstF_t oSetVSConstF;
 static int g_vsLogBudget = 80;
+typedef HRESULT (WINAPI* SetTexture_t)(IDirect3DDevice9*, DWORD, IDirect3DBaseTexture9*);
+static SetTexture_t oSetTexture;
+static HRESULT WINAPI hkSetTexture(IDirect3DDevice9* d, DWORD stage, IDirect3DBaseTexture9* t) {
+    if (stage == 0) g_tex0 = t;
+    return oSetTexture(d, stage, t);
+}
 typedef HRESULT (WINAPI* SetRenderTarget_t)(IDirect3DDevice9*, DWORD, IDirect3DSurface9*);
 static SetRenderTarget_t oSetRenderTarget;
 static HRESULT WINAPI hkSetRenderTarget(IDirect3DDevice9* d, DWORD i, IDirect3DSurface9* rt) {
     if (i == 0) g_rtIsBB = rt == g_bbPtr;
+    if (i == 0 && rt && rt != g_bbPtr && StereoEye()) {
+        IDirect3DTexture9* t = nullptr;
+        if (SUCCEEDED(rt->GetContainer(__uuidof(IDirect3DTexture9), (void**)&t)) && t) {
+            D3DSURFACE_DESC sd; rt->GetDesc(&sd);
+            if (sd.Width == g_eyeW && sd.Height == g_eyeH) g_sceneTex = t;
+            bool known = false; for (int k = 0; k < g_numRtTex; ++k) if (g_rtTex[k] == t) known = true;
+            if (!known && g_numRtTex < 16) { g_rtTex[g_numRtTex++] = t; Log("render-target texture %p %ux%u", t, sd.Width, sd.Height); }
+            t->Release();
+        }
+    }
     return oSetRenderTarget(d, i, rt);
 }
 
 // BiA's shaders take the world-view-projection matrix as rows in c8..c11 (x, y, z, w).
 static HRESULT WINAPI hkSetVSConstF(IDirect3DDevice9* d, UINT reg, const float* c, UINT n) {
+    // Keep a copy of c8..c11 as the game set them (before any of our changes).
+    for (UINT i = 0; i < n; ++i) { UINT r = reg + i; if (r >= 8 && r <= 11) memcpy(&g_c8[(r - 8) * 4], c + i * 4, 16); }
+    if (StereoEye() && g_eye == 0) {
+        if (reg <= 8 && reg + n >= 12 && n <= 64) {
+            const float* w = c + (11 - reg) * 4;
+            bool persp = fabsf(w[0]) + fabsf(w[1]) + fabsf(w[2]) > 1e-5f;
+            if (persp) { (g_rtIsBB ? g_hud.perspBB : g_hud.perspOther)++; g_seenPersp = true; }
+            else if (!g_seenPersp) g_hud.orthoBeforeScene++;
+            else {
+                (g_rtIsBB ? g_hud.orthoBB : g_hud.orthoOther)++;
+                static int tlog;
+                if (tlog < 6 && g_framesRendered > 600) {
+                    ++tlog;
+                    IDirect3DSurface9* rt = nullptr; D3DSURFACE_DESC dd = {};
+                    if (SUCCEEDED(d->GetRenderTarget(0, &rt)) && rt) { rt->GetDesc(&dd); rt->Release(); }
+                    Log("hud diag: flat draw after the 3D camera -> target %p %ux%u (backbuffer %p %ux%u), x row %.4f %.4f %.4f %.4f",
+                        rt, dd.Width, dd.Height, g_bbPtr, g_eyeW, g_eyeH, c[(8 - reg) * 4], c[(8 - reg) * 4 + 1], c[(8 - reg) * 4 + 2], c[(8 - reg) * 4 + 3]);
+                }
+            }
+        } else g_hud.otherRegs++;
+        static int dumps;
+        if (g_seenPersp && dumps < 2 && g_framesRendered > 600 && n >= 4 && !(reg <= 8 && reg + n >= 12)) {
+            ++dumps;
+            Log("after-scene constants c%u x%u (target is backbuffer %d):", reg, n, g_rtIsBB);
+            for (UINT i = 0; i < n && i < 24; ++i) Log("  c%-3u %10.4f %10.4f %10.4f %10.4f", reg + i, c[i * 4], c[i * 4 + 1], c[i * 4 + 2], c[i * 4 + 3]);
+        }
+    }
     if (!StereoEye() || !g_rtIsBB || reg > 8 || reg + n < 12 || n > 64) return oSetVSConstF(d, reg, c, n);
     float buf[64 * 4];
     memcpy(buf, c, n * 16);
@@ -1919,25 +2172,41 @@ static HRESULT WINAPI hkSetVSConstF(IDirect3DDevice9* d, UINT reg, const float* 
         for (int i = 0; i < 4; ++i) { rx[i] = rx[i] * ax - rw[i] * bx; ry[i] = ry[i] * ay - rw[i] * by; }
         g_exactUsed[e] = true;
         g_stats.persp++;
-    } else if (!persp && g_afterScene && g_cfg.hudScale > 0.f && g_cfg.hudScale < 1.f) {
-        for (int i = 0; i < 4; ++i) { rx[i] *= g_cfg.hudScale; ry[i] *= g_cfg.hudScale; }
-        g_stats.ortho++;
     } else return oSetVSConstF(d, reg, c, n);
     return oSetVSConstF(d, reg, buf, n);
 }
 
 static HRESULT WINAPI hkSetFVF(IDirect3DDevice9* d, DWORD fvf) { g_fvf = fvf; return oSetFVF(d, fvf); }
 static HRESULT WINAPI hkSetVertexShader(IDirect3DDevice9* d, IDirect3DVertexShader9* vs) { g_vs = vs; return oSetVertexShader(d, vs); }
+static bool g_hudScaled;
+static void HudPreDraw(IDirect3DDevice9* d) {
+    g_hudScaled = false;
+    if (!StereoEye() || !g_rtIsBB || !g_seenPersp || !oSetVSConstF) return;
+    float k = g_cfg.hudScale;
+    if (!(k > 0.f && k < 1.f)) return;
+    const float* w = g_c8 + 12;
+    if (fabsf(w[0]) + fabsf(w[1]) + fabsf(w[2]) > 1e-5f) return;   // perspective: 3D (e.g. the gun)
+    for (int i = 0; i < g_numRtTex; ++i) if (g_tex0 == g_rtTex[i]) return;   // copy of the 3D world / effects
+    if (!g_tex0) return;                                           // untextured full-screen fades etc.
+    float rows[8]; for (int i = 0; i < 8; ++i) rows[i] = g_c8[i] * k;
+    oSetVSConstF(d, 8, rows, 2);
+    g_hudScaled = true;
+    g_stats.ortho++;
+}
+static void HudPostDraw(IDirect3DDevice9* d) {
+    if (g_hudScaled) { oSetVSConstF(d, 8, g_c8, 2); g_hudScaled = false; }
+}
+
 static void CountDraw() {
     if (!StereoEye() || g_statFrames >= 3 && g_framesRendered % 3000 != 2999) return;
     g_stats.draws++;
     if (g_vs) g_stats.shaderDraws++;
     else if ((g_fvf & D3DFVF_POSITION_MASK) == D3DFVF_XYZRHW && g_afterScene) g_stats.rhwDraws++;
 }
-static HRESULT WINAPI hkDrawPrimitive(IDirect3DDevice9* d, D3DPRIMITIVETYPE t, UINT a, UINT b) { CountDraw(); return oDrawPrimitive(d, t, a, b); }
-static HRESULT WINAPI hkDrawIndexedPrimitive(IDirect3DDevice9* d, D3DPRIMITIVETYPE t, INT a, UINT b, UINT c, UINT e, UINT f) { CountDraw(); return oDrawIndexedPrimitive(d, t, a, b, c, e, f); }
-static HRESULT WINAPI hkDrawPrimitiveUP(IDirect3DDevice9* d, D3DPRIMITIVETYPE t, UINT n, const void* v, UINT st) { CountDraw(); return oDrawPrimitiveUP(d, t, n, v, st); }
-static HRESULT WINAPI hkDrawIndexedPrimitiveUP(IDirect3DDevice9* d, D3DPRIMITIVETYPE t, UINT a, UINT b, UINT c, const void* i, D3DFORMAT f, const void* v, UINT st) { CountDraw(); return oDrawIndexedPrimitiveUP(d, t, a, b, c, i, f, v, st); }
+static HRESULT WINAPI hkDrawPrimitive(IDirect3DDevice9* d, D3DPRIMITIVETYPE t, UINT a, UINT b) { CountDraw(); HudPreDraw(d); HRESULT r = oDrawPrimitive(d, t, a, b); HudPostDraw(d); return r; }
+static HRESULT WINAPI hkDrawIndexedPrimitive(IDirect3DDevice9* d, D3DPRIMITIVETYPE t, INT a, UINT b, UINT c, UINT e, UINT f) { CountDraw(); HudPreDraw(d); HRESULT r = oDrawIndexedPrimitive(d, t, a, b, c, e, f); HudPostDraw(d); return r; }
+static HRESULT WINAPI hkDrawPrimitiveUP(IDirect3DDevice9* d, D3DPRIMITIVETYPE t, UINT n, const void* v, UINT st) { CountDraw(); HudPreDraw(d); HRESULT r = oDrawPrimitiveUP(d, t, n, v, st); HudPostDraw(d); return r; }
+static HRESULT WINAPI hkDrawIndexedPrimitiveUP(IDirect3DDevice9* d, D3DPRIMITIVETYPE t, UINT a, UINT b, UINT c, const void* i, D3DFORMAT f, const void* v, UINT st) { CountDraw(); HudPreDraw(d); HRESULT r = oDrawIndexedPrimitiveUP(d, t, a, b, c, i, f, v, st); HudPostDraw(d); return r; }
 
 static void FixPool(D3DPOOL& pool, DWORD& usage) {
     if (pool == D3DPOOL_MANAGED) { pool = D3DPOOL_DEFAULT; usage |= D3DUSAGE_DYNAMIC; }
@@ -1987,6 +2256,7 @@ static HRESULT WINAPI hkPresent(IDirect3DDevice9* d, const RECT* a, const RECT* 
         CaptureEye(0);
         g_menuMode = true;
         ShowMenuFrame();
+        g_lastMoviePresent = GetTickCount();
         static int logs; if (logs++ < 3) Log("frame presented outside Draw (movie/loading) -> floating screen");
     }
     if (g_eye == 0) return D3D_OK;                 // left eye never goes to the monitor
@@ -2041,6 +2311,7 @@ static HRESULT WINAPI hkCreateDevice(IDirect3D9* self, UINT adapter, D3DDEVTYPE 
     PatchVtable(dev, 92, (void*)hkSetVertexShader, (void**)&oSetVertexShader);
     PatchVtable(dev, 94, (void*)hkSetVSConstF, (void**)&oSetVSConstF);
     PatchVtable(dev, 37, (void*)hkSetRenderTarget, (void**)&oSetRenderTarget);
+    PatchVtable(dev, 65, (void*)hkSetTexture, (void**)&oSetTexture);
     g_dev = dev;
     for (int e = 0; e < 2; ++e) { if (g_eyeTex9[e]) { g_eyeTex9[e]->Release(); g_eyeTex9[e] = nullptr; } }
     if (g_query) { g_query->Release(); g_query = nullptr; }

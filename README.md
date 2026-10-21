@@ -27,24 +27,28 @@ from the game's `System` folder. No game files are changed.
 | Right controller | | Left controller | |
 |---|---|---|---|
 | Trigger (R2) | Fire | Stick | Walk / strafe |
-| R1 | Aim down sights | □ / X-equivalent | Jump |
-| ✕ / A | Use / reload | △ / Y-equivalent | Switch weapon |
+| R1 | Aim down sights (most accurate) | □ / X-equivalent | Jump / continue prompts |
+| ✕ / A | Use / reload / continue prompts | △ / Y-equivalent | Switch weapon |
 | ○ / B | Crouch | L2 | Squad command |
 | Stick left/right | Snap turn | Stick click | Pause menu |
-| Stick click | Melee | L1 + right stick | Move the gun closer/further (saved per weapon) |
+| Stick click | Melee | L1 tap | V (situational awareness) |
+| | | L1 hold + right stick | Move the gun closer/further (saved per weapon) |
 
-- **Two-handed rifle:** put your left hand on the front of the rifle — it locks on and steers the barrel.
+- **Two-handed rifle:** put your left hand out in front of your right hand — it locks on and steers the barrel.
+- **Aiming:** hip fire goes where the gun points; hold **R1** to aim down sights for long-range accuracy.
 - **Holsters:** reach down to your hip or up over your shoulder and press **R1** to switch weapons.
 - **Menus:** point the right controller at the floating screen and pull the trigger.
 - **Sights:** hold **R1** for about a second once per weapon — the mod learns that gun's sight alignment.
-- **Keyboard:** F6 laser on/off · F7 controller aim on/off · F8 recenter view.
+- **Keyboard:** F6 aiming laser on/off (off by default) · F7 controller aim on/off · F8 recenter view.
+- A short tip about R1 and F6 appears in the first chapter.
 
 ## Settings
 `System\BiAVR.ini` is created on first launch with every option explained. Delete it to reset.
 
 ## Known issues
-- Aiming down sights (R1) is the most accurate; hip-fire accuracy is still being improved.
-- Captions and some HUD elements can sit near the edge of your view.
+- Hip fire is less accurate at long range than aiming down sights (R1). R1 slows you down and aims along your view - that's how the game's sights work.
+- Captions and some HUD elements sit low, near the bottom edge of your view.
+- Cutscenes follow your head instead of playing on a fixed screen.
 - The left hand can look rotated on some controllers — try `LeftHandRollDegrees` = 0 / 90 / -90 / 180.
 - Antivirus tools sometimes flag `d3d9.dll` (it hooks the game's DirectX); this is a common false alarm for mods of this kind.
 - If the game shows a "pure virtual function call" error at startup, plug in a keyboard and mouse.
